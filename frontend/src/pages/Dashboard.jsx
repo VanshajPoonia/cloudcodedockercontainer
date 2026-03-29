@@ -18,8 +18,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   const handleCreate = (templateId) => {
-    // Navigate to a new workspace instance
-    navigate(`/workspace/${templateId}-${Date.now()}`);
+    navigate(`/workspace/${templateId}-demo`);
   };
 
   return (

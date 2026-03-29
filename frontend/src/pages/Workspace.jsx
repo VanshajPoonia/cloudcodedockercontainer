@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -180,7 +180,7 @@ export default function Workspace() {
         </header>
 
         <main className="workspace-main" style={{display: 'flex', flex: 1, overflow: 'hidden'}}>
-          <PanelGroup direction="horizontal">
+          <Group direction="horizontal">
             {/* Sidebar (Instructions/Explorer) */}
             <Panel defaultSize={25} minSize={20} className="sidebar-pane">
               <div className="sidebar-tabs">
@@ -199,11 +199,11 @@ export default function Workspace() {
               </div>
             </Panel>
 
-            <PanelResizeHandle className="resize-handle-horizontal" />
+            <Separator className="resize-handle-horizontal" />
 
             {/* Center Pane (Editor + Terminal) */}
             <Panel defaultSize={45} minSize={30}>
-              <PanelGroup direction="vertical">
+              <Group direction="vertical">
                 {/* Editor */}
                 <Panel defaultSize={70} minSize={20} className="editor-pane">
                   <div className="editor-tabs">
@@ -226,7 +226,7 @@ export default function Workspace() {
                   </div>
                 </Panel>
 
-                <PanelResizeHandle className="resize-handle-vertical" />
+                <Separator className="resize-handle-vertical" />
 
                 {/* Terminal */}
                 <Panel defaultSize={30} minSize={15} className="terminal-pane">
@@ -236,10 +236,10 @@ export default function Workspace() {
                   </div>
                   <div className="terminal-container" ref={terminalRef}></div>
                 </Panel>
-              </PanelGroup>
+              </Group>
             </Panel>
 
-            <PanelResizeHandle className="resize-handle-horizontal" />
+            <Separator className="resize-handle-horizontal" />
 
             {/* Right Pane (App Preview) */}
             <Panel defaultSize={30} minSize={20} className="preview-pane">
@@ -257,7 +257,7 @@ export default function Workspace() {
                </div>
             </Panel>
 
-          </PanelGroup>
+          </Group>
         </main>
       </div>
     </div>
