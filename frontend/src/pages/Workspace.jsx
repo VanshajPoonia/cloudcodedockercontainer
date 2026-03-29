@@ -24,7 +24,6 @@ const socket = io('http://localhost:3001');
 
 export default function Workspace() {
   const { id } = useParams();
-  // id helps us know if it originated from a specific language template e.g., 'python-161...'
   const defaultLang = id && id.includes('-') ? id.split('-')[0] : 'javascript';
   const supportedLang = BOILERPLATES[defaultLang] ? defaultLang : 'javascript';
 
@@ -32,10 +31,17 @@ export default function Workspace() {
   const [code, setCode] = useState(BOILERPLATES[supportedLang]);
   const [isRunning, setIsRunning] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [workspaceId, setWorkspaceId] = useState(null);
+  const [containerPort, setContainerPort] = useState(null);
   
   const terminalRef = useRef(null);
   const termInstance = useRef(null);
   const fitAddon = useRef(null);
+  const [saving, setSaving] = useState(false);
+
+  // File extension helper
+  const ext = language === 'javascript' ? 'js' : language === 'python' ? 'py' : language === 'cpp' ? 'cpp' : 'go';
+  const mainFile = `main.${ext}`;
 
   useEffect(() => {
     // Initialize xterm
@@ -55,8 +61,7 @@ export default function Workspace() {
       fitAddon.current.fit();
     }, 100);
 
-    term.writeln('\x1b[38;2;59;130;246mWelcome to CloudCode Workspace.\x1b[0m\r\nTerminal connected.\r\n');
-
+    term.writeln('\x1b[38;2;59;130;246m[System] Booting CloudCode Persistent Workspace...\x1b[0m\r\n');
     termInstance.current = term;
 
     const resizeObserver = new ResizeObserver(() => fitAddon.current.fit());
@@ -64,75 +69,116 @@ export default function Workspace() {
         resizeObserver.observe(terminalRef.current);
     }
 
-    socket.on('connect', () => {
-      console.log('Connected to socket stream');
-      setIsConnected(true);
-    });
+    // Connect to WebSocket and create workspace
+    socket.on('connect', () => setIsConnected(true));
+    socket.on('disconnect', () => setIsConnected(false));
 
-    socket.on('disconnect', () => {
-      setIsConnected(false);
-    });
-
-    const handleOutput = ({ output, type }) => {
-      if (!termInstance.current) return;
-      const formatted = output.replace(/\n/g, '\r\n');
-      if (type === 'stderr') {
-        termInstance.current.write(`\x1b[31m${formatted}\x1b[0m`);
-      } else {
-        termInstance.current.write(formatted);
-      }
+    // Handle incoming terminal data
+    const handleTtyOutput = (data) => {
+      if (termInstance.current) termInstance.current.write(data);
     };
 
-    const handleStatus = ({ status }) => {
-      if (!termInstance.current) return;
-      if (status === 'completed' || status === 'error') {
-        termInstance.current.writeln(`\r\n\x1b[38;2;161;161;170m[Process ${status}]\x1b[0m\r\n`);
-        setIsRunning(false);
-      }
-    };
+    socket.on('tty_output', handleTtyOutput);
 
-    socket.on('execution_output', handleOutput);
-    socket.on('execution_status', handleStatus);
+    // Initialise workspace on Mount
+    fetch('http://localhost:3001/api/workspace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: supportedLang })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      
+      term.writeln('\x1b[32m[System] Container assigned! Attaching PTY...\x1b[0m\r\n');
+      setWorkspaceId(data.workspaceId);
+      setContainerPort(data.port);
+      
+      // Seed the workspace with the initial file
+      fetch('http://localhost:3001/api/fs/write', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          workspaceId: data.workspaceId, 
+          filePath: mainFile, 
+          content: BOILERPLATES[supportedLang] 
+        })
+      });
+
+      // Attach TTY
+      socket.emit('attach_tty', { containerId: data.containerId });
+
+      // Forward xterm input to backend
+      term.onData(input => {
+        socket.emit('tty_input', input);
+      });
+    })
+    .catch(err => {
+      term.writeln(`\r\n\x1b[31m[System Error] ${err.message}\x1b[0m\r\n`);
+    });
 
     return () => {
       term.dispose();
       resizeObserver.disconnect();
-      socket.off('execution_output', handleOutput);
-      socket.off('execution_status', handleStatus);
+      socket.off('tty_output', handleTtyOutput);
     };
   }, []);
+
+  // Save the code automatically via FS API
+  const handleEditorChange = (value) => {
+    setCode(value);
+    if (!workspaceId) return;
+
+    setSaving(true);
+    fetch('http://localhost:3001/api/fs/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        workspaceId, 
+        filePath: mainFile, 
+        content: value 
+      })
+    })
+    .then(() => setSaving(false))
+    .catch(console.error);
+  };
 
   const handleLanguageChange = (e) => {
     const newLang = e.target.value;
     setLanguage(newLang);
     setCode(BOILERPLATES[newLang]);
-  };
-
-  const runCode = async () => {
-    if (isRunning) return;
-    setIsRunning(true);
-    termInstance.current.clear();
-    termInstance.current.writeln(`\x1b[38;2;59;130;246m> Running ${language} code...\x1b[0m\r\n`);
-
-    try {
-      const res = await fetch('http://localhost:3001/api/execute', {
+    
+    // Changing language mid-session implies we just update the file on disk to the new lang boilerplate
+    if (workspaceId) {
+       const newExt = newLang === 'javascript' ? 'js' : newLang === 'python' ? 'py' : newLang === 'cpp' ? 'cpp' : 'go';
+       fetch('http://localhost:3001/api/fs/write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          code,
-          language,
-          socketId: socket.id
+        body: JSON.stringify({ 
+          workspaceId, 
+          filePath: `main.${newExt}`, 
+          content: BOILERPLATES[newLang] 
         })
       });
-      const data = await res.json();
-      if (!res.ok) {
-        termInstance.current.writeln(`\r\n\x1b[31mError: ${data.error}\x1b[0m`);
-        setIsRunning(false);
-      }
-    } catch (err) {
-      termInstance.current.writeln(`\r\n\x1b[31mSubmission failed: ${err.message}\x1b[0m`);
-      setIsRunning(false);
     }
+  };
+
+  const runCode = () => {
+    if (!isConnected || !workspaceId) return;
+    
+    // Focus terminal
+    termInstance.current.focus();
+
+    // Type the execution command into the PTY as if user typed it
+    let cmd = '';
+    if (language === 'javascript') cmd = `node main.js\r`;
+    if (language === 'python') cmd = `python main.py\r`;
+    if (language === 'cpp') cmd = `g++ main.cpp -o main && ./main\r`;
+    if (language === 'go') cmd = `go run main.go\r`;
+
+    socket.emit('tty_input', cmd);
   };
 
   return (
@@ -140,7 +186,7 @@ export default function Workspace() {
       {/* Activity Bar */}
       <nav className="activity-bar">
         <div className="activity-bar-top">
-          <div className="activity-icon brand-icon-small">
+          <div className="activity-icon brand-icon-small" onClick={() => window.location.href = '/'}>
              <Code2 size={24} color="#ef4444" />
           </div>
           <div className="activity-icon active"><FolderTree size={20} /></div>
@@ -155,7 +201,7 @@ export default function Workspace() {
       <div className="workspace-content">
         <header className="workspace-header">
           <div className="workspace-title">
-            <span className="file-name">Hello CloudCode! feat. {language === 'javascript' ? 'Node.js' : language === 'python' ? 'Python' : language === 'cpp' ? 'C++' : 'Go'}</span>
+            <span className="file-name">{mainFile}</span> <span style={{marginLeft: 8, fontSize: '0.75rem', color: '#858585'}}>{saving ? 'Saving...' : 'Saved'}</span>
           </div>
 
           <div className="controls">
@@ -171,10 +217,10 @@ export default function Workspace() {
             <button 
               className="btn-run" 
               onClick={runCode} 
-              disabled={isRunning || !isConnected}
+              disabled={!isConnected || !workspaceId}
             >
-              {isRunning ? <Loader2 className="loader" size={18} /> : <Play size={18} fill="currentColor" />}
-              {isRunning ? 'Running...' : 'Run'}
+              <Play size={18} fill="currentColor" />
+              Run
             </button>
           </div>
         </header>
@@ -182,32 +228,27 @@ export default function Workspace() {
         <main className="workspace-main" style={{display: 'flex', flex: 1, overflow: 'hidden'}}>
           <Group direction="horizontal">
             {/* Sidebar (Instructions/Explorer) */}
-            <Panel defaultSize={25} minSize={20} className="sidebar-pane">
+            <Panel defaultSize={20} minSize={15} className="sidebar-pane">
               <div className="sidebar-tabs">
                 <div className="tab active">INSTRUCTIONS</div>
-                <div className="tab">CHALLENGES</div>
-                <div className="tab">DISCUSSIONS</div>
+                <div className="tab">FILES</div>
               </div>
-              <div className="sidebar-content markdown-body">
-                <h2>Hello CloudCode! feat. {language}</h2>
-                <p>Welcome to your first-ever exercise Lab. Take a moment to explore the playground.</p>
-                <p>This lab is designed to get you familiar with the Playgrounds. You should have an editor along with a terminal window below the editor on your playground.</p>
-                <p>The editor is where all the code gets written, your code is then compiled by a currently running process in the terminal and the result is displayed.</p>
-                <h3>Task</h3>
-                <p>In this lab, you've been given a very simple Hello World Playground for <code>{language}</code>. Your task is to change the text and make sure to add an exclamation mark.</p>
-                <p>Once you've changed the text, you can run your code using the Run button available in the top bar. You should see the output in the Terminal.</p>
+              <div className="sidebar-content markdown-body" style={{padding: '16px'}}>
+                <h3 style={{marginTop: 0}}>Hello CloudCode! feat. {language}</h3>
+                <p>Enjoy your persistent backend workspace! Your files are synchronized via the internal File System API.</p>
+                <p>The terminal below is now a fully interactive `node-pty` docker shell. Try typing `ls -la`!</p>
               </div>
             </Panel>
 
             <Separator className="resize-handle-horizontal" />
 
             {/* Center Pane (Editor + Terminal) */}
-            <Panel defaultSize={45} minSize={30}>
+            <Panel defaultSize={50} minSize={30}>
               <Group direction="vertical">
                 {/* Editor */}
                 <Panel defaultSize={70} minSize={20} className="editor-pane">
                   <div className="editor-tabs">
-                    <div className="tab active">main.{language === 'javascript' ? 'js' : language === 'python' ? 'py' : language === 'cpp' ? 'cpp' : 'go'}</div>
+                    <div className="tab active">{mainFile}</div>
                   </div>
                   <div className="editor-wrapper">
                     <Editor
@@ -215,7 +256,7 @@ export default function Workspace() {
                       language={language}
                       theme="vs-dark"
                       value={code}
-                      onChange={setCode}
+                      onChange={handleEditorChange}
                       options={{
                         minimap: { enabled: false },
                         fontSize: 14,
@@ -232,7 +273,6 @@ export default function Workspace() {
                 <Panel defaultSize={30} minSize={15} className="terminal-pane">
                   <div className="terminal-tabs">
                     <div className="tab active"><TerminalSquare size={14} /> Terminal</div>
-                    <div className="tab">Output</div>
                   </div>
                   <div className="terminal-container" ref={terminalRef}></div>
                 </Panel>
@@ -248,12 +288,20 @@ export default function Workspace() {
                     <div className="tab active">Browser</div>
                  </div>
                </div>
-               <div className="preview-content">
-                  <div className="preview-placeholder">
-                    <MonitorPlay size={48} className="placeholder-icon" />
-                    <h3>Deployed App</h3>
-                    <p>App running on port 3000 will be shown here.</p>
-                  </div>
+               <div className="preview-content" style={{ width: '100%', height: '100%' }}>
+                  {containerPort ? (
+                     <iframe 
+                       src={`http://localhost:${containerPort}`} 
+                       style={{ width: '100%', height: '100%', border: 'none', backgroundColor: '#fff' }}
+                       title="App Preview"
+                     />
+                  ) : (
+                    <div className="preview-placeholder">
+                      <MonitorPlay size={48} className="placeholder-icon" />
+                      <h3>Deployed App</h3>
+                      <p>Start a web server (e.g., node server.js) on port 3000 inside the terminal to see it here.</p>
+                    </div>
+                  )}
                </div>
             </Panel>
 
